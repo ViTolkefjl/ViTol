@@ -11,13 +11,59 @@ ISO_FILE="/home/user/Загрузки/Additional.iso"
 ISO_MOUNT="/media/cdrom0"
 DOMAIN="au-team.irpo"
 
-# Fixed IPs (как в модуле 1)
-DEF_HQ_SRV_IP="52.52.52.2"       # HQ-SRV
-DEF_BR_SRV_IP="30.30.30.2"       # BR-SRV
-DEF_HQ_RTR_IP="172.16.4.2"       # HQ-RTR WAN
-DEF_BR_RTR_IP="172.16.5.2"       # BR-RTR WAN
-DEF_HQ_CLI_IP="172.16.7.3"       # HQ-CLI
-DEF_HQ_CLI_NET="172.16.7.0/28"   # сеть HQ-CLI
+# Default IPs (per your layout)
+DEF_HQ_SRV_IP="192.168.10.2"
+DEF_BR_SRV_IP="192.168.100.2"
+DEF_HQ_RTR_IP="172.16.1.2"
+DEF_BR_RTR_IP="172.16.2.2"
+DEF_HQ_CLI_IP="192.168.20.2"
+DEF_HQ_CLI_NET="192.168.20.0/28"
+
+ALLOWED_CLIENT_KEYS="69 346 524 582 666 714 777 858 903 911 935 948 972"
+CLIENT_KEY="$(printf %s "${CLIENT_KEY:-}" | tr -d '\r' | xargs)"
+if [ -z "${CLIENT_KEY:-}" ]; then
+  echo "ERROR: CLIENT_KEY is required"
+  exit 1
+fi
+if ! printf '%s\n' ${ALLOWED_CLIENT_KEYS} | grep -Fxq "${CLIENT_KEY}"; then
+  echo "ERROR: invalid CLIENT_KEY: ${CLIENT_KEY}"
+  exit 1
+fi
+
+# If CLIENT_KEY is provided, generate deterministic unique addressing
+if [ -n "${CLIENT_KEY:-}" ]; then
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "ERROR: sha256sum is required for CLIENT_KEY mode"
+    exit 1
+  fi
+
+  SEED_HEX="$(echo -n "$CLIENT_KEY" | sha256sum | awk '{print $1}' | cut -c1-8)"
+  SEED=$((16#$SEED_HEX))
+
+  BASE_A=$(( (SEED % 200) + 20 ))
+  BASE_B=$(( ((SEED / 257) % 200) + 20 ))
+  WAN_C=$(( ((SEED / 65537) % 200) + 20 ))
+
+  next_octet() {
+    local base="$1" off="$2"
+    echo $(( ((base - 20 + off) % 200) + 20 ))
+  }
+
+  O1="$(next_octet "$BASE_B" 0)"
+  O2="$(next_octet "$BASE_B" 1)"
+  O4="$(next_octet "$BASE_B" 3)"
+
+  DEF_HQ_SRV_IP="10.${BASE_A}.${O1}.2"
+  DEF_HQ_CLI_IP="10.${BASE_A}.${O2}.2"
+  DEF_BR_SRV_IP="10.${BASE_A}.${O4}.2"
+  DEF_HQ_CLI_NET="10.${BASE_A}.${O2}.0/28"
+
+  DEF_HQ_RTR_IP="172.16.${WAN_C}.2"
+  WAN_D="$(next_octet "$WAN_C" 37)"
+  DEF_BR_RTR_IP="172.16.${WAN_D}.2"
+
+  echo ">>> CLIENT_KEY accepted: $CLIENT_KEY"
+fi
 
 HQ_SRV_IP="$DEF_HQ_SRV_IP"
 BR_SRV_IP="$DEF_BR_SRV_IP"
@@ -386,8 +432,8 @@ CONF
     mount | grep ' /mnt/nfs ' || echo "WARN: /mnt/nfs is not mounted after mount -a"
 
     # Yandex Browser (best-effort)
-    install_pkg curl gnupg ca-certificates
-    if curl -fsSL https://repo.yandex.ru/yandex-browser/YANDEX-BROWSER-KEY.GPG | gpg --dearmor -o /usr/share/keyrings/yandex-browser.gpg; then
+    install_pkg wget gnupg ca-certificates curl
+    if curl -fsSL https://repo.yandex.ru/yandex-browser/YANDEX-BROWSER-KEY.GPG | gpg --dearmor --yes -o /usr/share/keyrings/yandex-browser.gpg; then
       echo "deb [signed-by=/usr/share/keyrings/yandex-browser.gpg] https://repo.yandex.ru/yandex-browser/deb stable main" > /etc/apt/sources.list.d/yandex-browser.list
       apt-get update
       install_pkg yandex-browser-stable || true
