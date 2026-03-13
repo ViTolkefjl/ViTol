@@ -160,41 +160,97 @@ if [ "$ROLE" = "isp" ]; then
     prompt_var ISP_BR_IFACE "ens37" "ISP interface toward BR"
 fi
 
-# Базовая адресация (ФИКСИРОВАННАЯ, без привязки к CLIENT_KEY)
-DEF_HQ_SRV_IP_CIDR="52.52.52.2/27"          # HQ-SRV
-DEF_BR_SRV_IP_CIDR="30.30.30.2/27"          # BR-SRV
-
-# Линки к ISP
-DEF_HQ_RTR_WAN_IP_CIDR="172.16.4.2/28"      # HQ-RTR ↔ ISP
-DEF_BR_RTR_WAN_IP_CIDR="172.16.5.2/30"      # BR-RTR ↔ ISP
-
-# VLAN'ы на HQ-RTR
-DEF_HQ_RTR_VLAN100_IP_CIDR="52.52.52.1/27"  # VLAN100, сеть HQ-SRV
-DEF_HQ_RTR_VLAN200_IP_CIDR="172.16.7.1/28"  # VLAN200, сеть HQ-CLI
-DEF_HQ_RTR_VLAN999_IP_CIDR="172.16.9.1/29"  # VLAN999, mgmt (любая свободная)
-
-# LAN филиала
-DEF_BR_RTR_LAN_IP_CIDR="30.30.30.1/27"      # BR-RTR LAN
-DEF_HQ_CLI_IP_CIDR="172.16.7.3/28"          # HQ-CLI
-
-# Интерфейсы ISP к HQ и BR
-DEF_ISP_HQ_IP_CIDR="172.16.4.1/28"          # ISP ↔ HQ
-DEF_ISP_BR_IP_CIDR="172.16.5.1/30"          # ISP ↔ BR
-
-# Сети (для маршрутов, DHCP, OSPF)
-DEF_HQ_SRV_NET="52.52.52.0/27"
-DEF_HQ_CLI_NET="172.16.7.0/28"
-DEF_BR_SRV_NET="30.30.30.0/27"
-
-# GRE-туннель между HQ-RTR и BR-RTR
-DEF_GRE_NET="10.10.10.0/30"
-DEF_GRE_HQ_IP="10.10.10.1"
-DEF_GRE_BR_IP="10.10.10.2"
+# Базовая адресация (будет детерминированно переопределена по CLIENT_KEY)
+DEF_HQ_SRV_IP_CIDR="192.168.10.2/27"
+DEF_BR_SRV_IP_CIDR="192.168.100.2/28"
+DEF_HQ_RTR_WAN_IP_CIDR="172.16.1.2/28"
+DEF_BR_RTR_WAN_IP_CIDR="172.16.2.2/28"
+DEF_HQ_RTR_VLAN100_IP_CIDR="192.168.10.1/27"
+DEF_HQ_RTR_VLAN200_IP_CIDR="192.168.20.1/28"
+DEF_HQ_RTR_VLAN999_IP_CIDR="192.168.250.1/29"
+DEF_BR_RTR_LAN_IP_CIDR="192.168.100.1/28"
+DEF_HQ_CLI_IP_CIDR="192.168.20.2/28"
+DEF_ISP_HQ_IP_CIDR="172.16.1.1/28"
+DEF_ISP_BR_IP_CIDR="172.16.2.1/28"
+DEF_HQ_SRV_NET="192.168.10.0/27"
+DEF_HQ_CLI_NET="192.168.20.0/28"
+DEF_BR_SRV_NET="192.168.100.0/28"
+DEF_GRE_NET="10.0.0.0/30"
+DEF_GRE_HQ_IP="10.0.0.1"
+DEF_GRE_BR_IP="10.0.0.2"
 DEF_GRE_NETMASK="255.255.255.252"
+DEF_DHCP_RANGE_START="192.168.20.2"
+DEF_DHCP_RANGE_END="192.168.20.14"
 
-# DHCP для HQ-CLI
-DEF_DHCP_RANGE_START="172.16.7.2"
-DEF_DHCP_RANGE_END="172.16.7.14"
+
+# CLIENT_KEY обязателен и должен быть из разрешенного списка
+ALLOWED_CLIENT_KEYS="69 346 524 582 666 714 777 858 903 911 935 948 972"
+CLIENT_KEY="$(printf %s "${CLIENT_KEY:-}" | tr -d '\r' | xargs)"
+if [ -z "${CLIENT_KEY:-}" ]; then
+    echo "Ошибка: CLIENT_KEY обязателен."
+    exit 1
+fi
+if ! printf '%s\n' ${ALLOWED_CLIENT_KEYS} | grep -Fxq "${CLIENT_KEY}"; then
+    echo "Ошибка: недопустимый CLIENT_KEY: ${CLIENT_KEY}"
+    exit 1
+fi
+
+# Если задан CLIENT_KEY, генерируем уникальную, но стабильную адресацию
+if [ -n "${CLIENT_KEY:-}" ]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "Ошибка: sha256sum не найден, генерация адресов по CLIENT_KEY недоступна"
+        exit 1
+    fi
+
+    SEED_HEX="$(echo -n "$CLIENT_KEY" | sha256sum | awk '{print $1}' | cut -c1-8)"
+    SEED=$((16#$SEED_HEX))
+
+    BASE_A=$(( (SEED % 200) + 20 ))
+    BASE_B=$(( ((SEED / 257) % 200) + 20 ))
+    WAN_C=$(( ((SEED / 65537) % 200) + 20 ))
+
+    next_octet() {
+        local base="$1" off="$2"
+        echo $(( ((base - 20 + off) % 200) + 20 ))
+    }
+
+    O1="$(next_octet "$BASE_B" 0)"
+    O2="$(next_octet "$BASE_B" 1)"
+    O3="$(next_octet "$BASE_B" 2)"
+    O4="$(next_octet "$BASE_B" 3)"
+    O5="$(next_octet "$BASE_B" 10)"
+
+    DEF_HQ_SRV_NET="10.${BASE_A}.${O1}.0/27"
+    DEF_HQ_CLI_NET="10.${BASE_A}.${O2}.0/28"
+    DEF_BR_SRV_NET="10.${BASE_A}.${O4}.0/28"
+    DEF_GRE_NET="10.${BASE_A}.${O5}.0/30"
+
+    DEF_HQ_RTR_VLAN100_IP_CIDR="10.${BASE_A}.${O1}.1/27"
+    DEF_HQ_SRV_IP_CIDR="10.${BASE_A}.${O1}.2/27"
+
+    DEF_HQ_RTR_VLAN200_IP_CIDR="10.${BASE_A}.${O2}.1/28"
+    DEF_HQ_CLI_IP_CIDR="10.${BASE_A}.${O2}.2/28"
+
+    DEF_HQ_RTR_VLAN999_IP_CIDR="10.${BASE_A}.${O3}.1/29"
+
+    DEF_BR_RTR_LAN_IP_CIDR="10.${BASE_A}.${O4}.1/28"
+    DEF_BR_SRV_IP_CIDR="10.${BASE_A}.${O4}.2/28"
+
+    DEF_ISP_HQ_IP_CIDR="172.16.${WAN_C}.1/28"
+    DEF_HQ_RTR_WAN_IP_CIDR="172.16.${WAN_C}.2/28"
+
+    WAN_D="$(next_octet "$WAN_C" 37)"
+    DEF_ISP_BR_IP_CIDR="172.16.${WAN_D}.1/28"
+    DEF_BR_RTR_WAN_IP_CIDR="172.16.${WAN_D}.2/28"
+
+    DEF_GRE_HQ_IP="10.${BASE_A}.${O5}.1"
+    DEF_GRE_BR_IP="10.${BASE_A}.${O5}.2"
+
+    DEF_DHCP_RANGE_START="10.${BASE_A}.${O2}.2"
+    DEF_DHCP_RANGE_END="10.${BASE_A}.${O2}.14"
+
+    echo ">>> CLIENT_KEY принят: используется сгенерированная адресация ($CLIENT_KEY)"
+fi
 
 # IP адреса (с CIDR там, где нужно)
 prompt_var HQ_SRV_IP_CIDR "$DEF_HQ_SRV_IP_CIDR" "HQ-SRV IP/CIDR"
